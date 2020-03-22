@@ -68,7 +68,7 @@ class GifFrameExtractor
     private $fileHeader;
 
     /**
-     * @var integer The reader pointer in the file source
+     * @var integer The reader pointer in the file source or image data
      *
      * (old: $this->pointer)
      */
@@ -95,6 +95,11 @@ class GifFrameExtractor
     private $handle;
 
     /**
+     * @var string Gif file contents
+     */
+    private $data;
+
+    /**
      * @var array
      *
      * (old: globaldata)
@@ -112,21 +117,90 @@ class GifFrameExtractor
     // ===================================================================================
 
     /**
-     * Extract frames of a GIF
+     * Extract frames of a GIF file
      *
      * @param string $filename GIF filename path
      * @param boolean $originalFrames Get original frames (with transparent background)
      *
      * @return array
      */
-    public function extract($filename, $originalFrames = false)
+    public function extractFromFile($filename, $originalFrames = false)
     {
-        if (!self::isAnimatedGif($filename)) {
+        if (!self::isAnimatedGifFile($filename)) {
             throw new \Exception('The GIF image you are trying to explode is not animated !');
         }
 
         $this->reset();
-        $this->parseFramesInfo($filename);
+        $this->openFile($filename);
+        $this->parseFramesInfo();
+        return $this->extract($originalFrames);
+    }
+
+    /**
+     * Extract frames of a GIF file contents
+     *
+     * @param string $data GIF file contents
+     * @param boolean $originalFrames Get original frames (with transparent background)
+     *
+     * @return array
+     */
+    public function extractFromData($data, $originalFrames = false)
+    {
+        if (!self::isAnimatedGifData($data)) {
+            throw new \Exception('The GIF image you are trying to explode is not animated !');
+        }
+
+        $this->reset();
+        $this->openImage($data);
+        $this->parseFramesInfo();
+        return $this->extract($originalFrames);
+    }
+
+    /**
+     * Check if a GIF file at a path is animated or not
+     *
+     * @param string $filename GIF path
+     */
+    public static function isAnimatedGifFile($filename)
+    {
+        if (!($fh = @fopen($filename, 'rb'))) {
+            return false;
+        }
+
+        $count = 0;
+
+        while (!feof($fh) && $count < 2) {
+
+            $chunk = fread($fh, 1024 * 100); //read 100kb at a time
+            $count += preg_match_all('#\x00\x21\xF9\x04.{4}\x00(\x2C|\x21)#s', $chunk, $matches);
+        }
+
+        fclose($fh);
+        return $count > 1;
+    }
+
+    /**
+     * Check if a GIF from data is animated or not
+     *
+     * @param string $data GIF file contents
+     */
+    public static function isAnimatedGifData($data)
+    {
+        return preg_match_all('#\x00\x21\xF9\x04.{4}\x00(\x2C|\x21)#s', $data, $matches) > 1;
+    }
+
+    // Internals
+    // ===================================================================================
+
+    /**
+     * Extract frames of a internally parsed GIF
+     *
+     * @param boolean $originalFrames Get original frames (with transparent background)
+     *
+     * @return array
+     */
+    private function extract($originalFrames)
+    {
         $prevImg = null;
 
         for ($i = 0; $i < count($this->frameSources); $i++) {
@@ -174,39 +248,10 @@ class GifFrameExtractor
     }
 
     /**
-     * Check if a GIF file at a path is animated or not
-     *
-     * @param string $filename GIF path
+     * Parse the frame informations contained in the read GIF
      */
-    public static function isAnimatedGif($filename)
+    private function parseFramesInfo()
     {
-        if (!($fh = @fopen($filename, 'rb'))) {
-            return false;
-        }
-
-        $count = 0;
-
-        while (!feof($fh) && $count < 2) {
-
-            $chunk = fread($fh, 1024 * 100); //read 100kb at a time
-            $count += preg_match_all('#\x00\x21\xF9\x04.{4}\x00(\x2C|\x21)#s', $chunk, $matches);
-        }
-
-        fclose($fh);
-        return $count > 1;
-    }
-
-    // Internals
-    // ===================================================================================
-
-    /**
-     * Parse the frame informations contained in the GIF file
-     *
-     * @param string $filename GIF filename path
-     */
-    private function parseFramesInfo($filename)
-    {
-        $this->openFile($filename);
         $this->parseGifHeader();
         $this->parseGraphicsExtension(0);
         $this->getApplicationData();
@@ -526,12 +571,30 @@ class GifFrameExtractor
     }
 
     /**
+     * Open the gif contents of a image buffer
+     *
+     * @param string $data
+     */
+    private function openImage($data)
+    {
+        $this->handle = 0;
+        $this->pointer = 0;
+        $this->data = $data;
+
+        $imageSize = getimagesizefromstring($data);
+        $this->gifWidth = $imageSize[0];
+        $this->gifHeight = $imageSize[1];
+    }
+
+    /**
      * Close the read gif file (old: closefile)
      */
     private function closeFile()
     {
-        fclose($this->handle);
-        $this->handle = 0;
+        if($this->handle != 0) {
+            fclose($this->handle);
+            $this->handle = 0;
+        }
     }
 
     /**
@@ -543,10 +606,14 @@ class GifFrameExtractor
      */
     private function readByte($byteCount)
     {
-        $data = fread($this->handle, $byteCount);
+        if($this->handle != 0) {
+            $readData = fread($this->handle, $byteCount);
+        } else {
+            $readData = substr($this->data, $this->pointer, $byteCount);
+        }
         $this->pointer += $byteCount;
 
-        return $data;
+        return $readData;
     }
 
     /**
@@ -556,10 +623,14 @@ class GifFrameExtractor
      */
     private function readByteInt()
     {
-        $data = fread($this->handle, 1);
+        if($this->handle != 0) {
+            $readData = fread($this->handle, 1);
+        } else {
+            $readData = substr($this->data, $this->pointer, 1);
+        }
         $this->pointer++;
 
-        return ord($data);
+        return ord($readData);
     }
 
     /**
@@ -587,7 +658,9 @@ class GifFrameExtractor
     private function pointerRewind($length)
     {
         $this->pointer -= $length;
-        fseek($this->handle, $this->pointer);
+        if($this->handle != 0) {
+            fseek($this->handle, $this->pointer);
+        }
     }
 
     /**
@@ -598,7 +671,9 @@ class GifFrameExtractor
     private function pointerForward($length)
     {
         $this->pointer += $length;
-        fseek($this->handle, $this->pointer);
+        if($this->handle != 0) {
+            fseek($this->handle, $this->pointer);
+        }
     }
 
     /**
@@ -611,11 +686,15 @@ class GifFrameExtractor
      */
     private function dataPart($start, $length)
     {
-        fseek($this->handle, $start);
-        $data = fread($this->handle, $length);
-        fseek($this->handle, $this->pointer);
+        if($this->handle != 0) {
+            fseek($this->handle, $start);
+            $readData = fread($this->handle, $length);
+            fseek($this->handle, $this->pointer);
+        } else {
+            $readData = substr($this->data, $start, $length);
+        }
 
-        return $data;
+        return $readData;
     }
 
     /**
@@ -627,15 +706,21 @@ class GifFrameExtractor
      */
     private function checkByte($byte)
     {
-        if (fgetc($this->handle) == chr($byte)) {
-
+        $retval = false;
+        if($this->handle != 0) {
+            if (fgetc($this->handle) == chr($byte)) {
+                $retval = true;
+            }
             fseek($this->handle, $this->pointer);
-            return true;
+        } else {
+           if($this->pointer < strlen($this->data)) {
+               if ($this->data[$this->pointer] == chr($byte)) {
+                  $retval = true;
+               }
+           }
         }
 
-        fseek($this->handle, $this->pointer);
-
-        return false;
+        return $retval;
     }
 
     /**
@@ -645,12 +730,17 @@ class GifFrameExtractor
      */
     private function checkEOF()
     {
-        if (fgetc($this->handle) === false) {
-
-            return true;
+        $retval = false;
+        if($this->handle != 0) {
+            if (fgetc($this->handle) === false) {
+                $retval = true;
+            }
+            fseek($this->handle, $this->pointer);
+        } else {
+           if($this->pointer >= strlen($this->data)) {
+               $retval = true;
+           }
         }
-
-        fseek($this->handle, $this->pointer);
 
         return false;
     }
@@ -661,7 +751,7 @@ class GifFrameExtractor
     private function reset()
     {
         $this->gif = null;
-        $this->totalDuration = $this->gifMaxHeight = $this->gifMaxWidth = $this->handle = $this->pointer = $this->frameNumber = 0;
+        $this->totalDuration = $this->gifMaxHeight = $this->gifMaxWidth = $this->handle = $this->pointer = $this->frameNumber = $this->data = 0;
         $this->frameDimensions = $this->framePositions = $this->frameImages = $this->frameDurations = $this->globaldata = $this->orgvars = $this->frames = $this->fileHeader = $this->frameSources = array();
     }
 
